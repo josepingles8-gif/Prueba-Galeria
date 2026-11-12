@@ -354,3 +354,4 @@
 @media (prefers-reduced-motion: reduce) {
   .pe-spinner { animation-duration: 2s; }
 }
+.pe-filters { padding-top: 6px; }
