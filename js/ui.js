@@ -45,14 +45,14 @@ export function sheet({ title, content, onClose }) {
   const api = { el: s, close: () => dismiss(entry) };
   return api;
 }
-export function menuSheet(rows, title) {
+export function menuSheet(rows, title, onClose) {
   const c = el('div', 'rows');
   rows.filter(Boolean).forEach(r => {
     const b = el('button', 'row' + (r.danger ? ' danger' : ''), `<span class="ri">${icon(r.icon || 'info', 22)}</span><span class="rl">${esc(r.label)}</span>${r.note ? `<span class="rn">${esc(r.note)}</span>` : ''}`);
-    b.onclick = async () => { await s.close(); r.fn && r.fn(); };
+    b.onclick = async () => { s.picked = true; await s.close(); r.fn && r.fn(); };
     c.append(b);
   });
-  const s = sheet({ title, content: c });
+  const s = sheet({ title, content: c, onClose: () => onClose && onClose(s) });
   return s;
 }
 

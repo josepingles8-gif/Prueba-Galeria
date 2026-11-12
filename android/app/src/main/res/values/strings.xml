@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Galería</string>
+    <string name="saved">Guardado en Galería</string>
+    <string name="save_failed">No se pudo guardar</string>
+    <string name="permission_denied">Permiso de almacenamiento denegado</string>
+    <string name="share_title">Compartir</string>
+</resources>

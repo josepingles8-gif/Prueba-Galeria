@@ -2,7 +2,7 @@
 // Estrategia: cache-first para recursos del mismo origen (app shell y tiempo de ejecución),
 // con red como respaldo y guardado en caché de lo que se vaya cargando.
 
-const VERSION = "v1";
+const VERSION = "v2";
 const CACHE_PREFIX = "galeria-";
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 
@@ -11,6 +11,16 @@ const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 const APP_SHELL = [
   "./",
   "./index.html",
+  "./css/app.css",
+  "./css/editor.css",
+  "./js/app.js",
+  "./js/db.js",
+  "./js/ui.js",
+  "./js/viewer.js",
+  "./js/util.js",
+  "./js/icons.js",
+  "./js/samples.js",
+  "./js/editor.js",
   "./manifest.webmanifest",
   "./icons/icon.svg",
 ];

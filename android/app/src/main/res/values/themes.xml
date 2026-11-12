@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.Galeria" parent="android:Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31" xmlns:tools="http://schemas.android.com/tools">@color/window_bg</item>
+    </style>
+</resources>

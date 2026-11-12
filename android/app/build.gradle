@@ -1,0 +1,86 @@
+plugins {
+    id 'com.android.application'
+}
+
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+if (keystoreFile.exists()) {
+    keystoreFile.withInputStream { keystoreProps.load(it) }
+}
+
+android {
+    namespace 'com.galeria.app'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.galeria.app'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '1.0'
+    }
+
+    signingConfigs {
+        release {
+            if (keystoreProps['storeFile']) {
+                storeFile rootProject.file(keystoreProps['storeFile'])
+                storePassword keystoreProps['storePassword']
+                keyAlias keystoreProps['keyAlias']
+                keyPassword keystoreProps['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError true
+    }
+
+    // Los recursos web viven en la raiz del repo; se sincronizan a un dir generado.
+    sourceSets {
+        main {
+            assets.srcDir layout.buildDirectory.dir('generated/webAssets')
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
+    implementation 'androidx.activity:activity:1.9.3'
+    implementation 'androidx.webkit:webkit:1.12.1'
+    // kotlin-stdlib-jdk7/jdk8 ya estan integrados en kotlin-stdlib >= 1.8: evita clases duplicadas.
+    constraints {
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22') { because 'merged into kotlin-stdlib' }
+        implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22') { because 'merged into kotlin-stdlib' }
+    }
+}
+
+def webRoot = rootProject.projectDir.parentFile
+def syncWebAssets = tasks.register('syncWebAssets', Sync) {
+    into layout.buildDirectory.dir('generated/webAssets/www')
+    from(webRoot) {
+        include 'index.html', 'manifest.webmanifest', 'sw.js'
+    }
+    from(new File(webRoot, 'css')) { into 'css' }
+    from(new File(webRoot, 'js')) { into 'js' }
+    from(new File(webRoot, 'icons')) { into 'icons' }
+}
+
+tasks.named('preBuild') { dependsOn syncWebAssets }
+// Garantiza el orden para tareas que consumen assets (lint, merge).
+tasks.configureEach { t ->
+    if (t.name.startsWith('merge') && t.name.endsWith('Assets') || t.name.startsWith('lintVital') || t.name.startsWith('generate') && t.name.endsWith('LintReportModel') || t.name.startsWith('lintAnalyze')) {
+        t.dependsOn syncWebAssets
+    }
+}
