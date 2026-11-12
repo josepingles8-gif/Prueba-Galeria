@@ -1,6 +1,6 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
-import { el, esc, norm, ls, dayKey, dayLabel, monthKey, monthLabel, fmtDateTime, fmtSize, isVideo, plural, thumbURL, dropThumbURL, makeThumb, fmtDur, probeDuration, bridgeStage } from './util.js';
+import { el, esc, norm, ls, dayKey, dayLabel, monthKey, monthLabel, fmtDateTime, fmtSize, isVideo, plural, thumbURL, dropThumbURL, makeThumb, fmtDur, probeDuration, bridgeStage, monthName } from './util.js';
 import { pushOverlay, dismiss, overlayCount, sheet, menuSheet, dialog, toast } from './ui.js';
 import { openViewer } from './viewer.js';
 
@@ -9,6 +9,11 @@ const app = $('#app'), scroll = $('#scroll'), body = $('#body');
 const LEVELS = [3, 4, 7, 'm'];
 const DAY = 864e5, PURGE_DAYS = 30;
 
+// En Android (WebView con puente nativo) las fotos del teléfono se leen de MediaStore.
+const AB = () => window.AndroidBridge;
+const DEV = !!(window.AndroidBridge && window.AndroidBridge.hasMediaPermission);
+const pid = s => typeof s === 'string' && s.startsWith('dev:') ? s : +s;
+let devState = 'full', devMeta = new Map(), permAsked = false, permWant = false, booted = false;
 let items = [], albums = new Map(), byId = new Map(), groups = new Map();
 let aset = { sort: 'custom', cols: 3, essential: false };
 const asel = new Set();
@@ -19,14 +24,89 @@ let query = '', lastKey = null;
 
 // ---------- data
 async function load() {
-  items = await db.getItems();
+  const idb = await db.getItems();
   albums = new Map((await db.getAlbums()).map(a => [a.name, a]));
   groups = new Map((await db.getGroups()).map(g => [g.id, g]));
   aset = { sort: 'custom', cols: 3, essential: false, ...((await db.getMeta('albumPrefs')) || {}) };
-  const old = items.filter(i => i.trashedAt && Date.now() - i.trashedAt > PURGE_DAYS * DAY);
-  if (old.length) { await db.deleteItems(old.map(i => i.id)); const s = new Set(old.map(i => i.id)); items = items.filter(i => !s.has(i.id)); }
+  if (DEV) devMeta = new Map((await db.getDevMeta()).map(r => [r.id, r]));
+  const old = idb.filter(i => i.trashedAt && Date.now() - i.trashedAt > PURGE_DAYS * DAY);
+  if (old.length) { await db.deleteItems(old.map(i => i.id)); const s = new Set(old.map(i => i.id)); items = idb.filter(i => !s.has(i.id)); } else items = idb;
+  if (DEV) items = items.concat(devKept);
   reindex();
 }
+// ----- fotos del dispositivo (fuente de solo lectura fusionada con las de IndexedDB)
+const devKept = [];
+function mkDev(r) {
+  const id = 'dev:' + r.id, m = devMeta.get(id);
+  return { id, dev: true, mid: r.id, name: r.name, date: r.date, size: r.size, mime: r.mime, width: r.width, height: r.height, duration: r.duration ? r.duration / 1000 : undefined,
+    devAlbum: r.album, album: (m && m.album) || r.album, thumbUrl: '/media/thumb/' + r.id, fullUrl: '/media/full/' + r.id, favorite: !!(m && m.favorite), trashedAt: (m && m.trashedAt) || null };
+}
+const sameDev = (a, b) => a.name === b.name && a.date === b.date && a.size === b.size && a.devAlbum === b.devAlbum && a.width === b.width && a.height === b.height && a.duration === b.duration;
+// Vuelve a pedir la lista; devuelve true si algo cambió (elementos o estado de permiso).
+async function refreshDevice() {
+  if (!DEV) return false;
+  const before = devState;
+  devState = AB().hasMediaPermission();
+  let raw = null;
+  if (devState === 'none') raw = [];
+  else { try { const r = await fetch('/media/list.json', { cache: 'no-store' }); if (r.ok) raw = await r.json(); } catch (e) { console.warn('lista de medios', e); } }
+  if (!raw) return devState !== before;
+  const prev = new Map();
+  for (const i of items) if (i.dev) prev.set(i.id, i);
+  const next = [];
+  let changed = devState !== before || prev.size !== raw.length;
+  for (const r of raw) {
+    const n = mkDev(r), o = prev.get(n.id);
+    if (o && sameDev(o, n)) next.push(o); else { next.push(n); changed = true; }
+  }
+  if (devState === 'full' && raw.length) { // metadatos de ids que ya no existen
+    const ids = new Set(next.map(i => i.id)), gone = [...devMeta.keys()].filter(k => !ids.has(k));
+    if (gone.length) { gone.forEach(k => devMeta.delete(k)); db.deleteDevMeta(gone).catch(() => {}); }
+  }
+  const exp = next.filter(i => i.trashedAt && Date.now() - i.trashedAt > PURGE_DAYS * DAY);
+  if (exp.length) { exp.forEach(i => { i.trashedAt = null; }); saveItems(exp).catch(() => {}); changed = true; }
+  if (!changed) return false;
+  items = items.filter(i => !i.dev).concat(next);
+  reindex();
+  return true;
+}
+// Guarda cambios de usuario: elementos propios en IndexedDB; metadatos (favorito, papelera, álbum) de los del dispositivo.
+async function saveItems(list) {
+  const loc = list.filter(i => !i.dev), dv = list.filter(i => i.dev);
+  if (loc.length) await db.putItems(loc);
+  if (!dv.length) return;
+  const put = [], del = [];
+  for (const i of dv) {
+    const rec = { id: i.id, favorite: !!i.favorite, trashedAt: i.trashedAt || null, album: i.album !== i.devAlbum ? i.album : null };
+    if (rec.favorite || rec.trashedAt || rec.album) { put.push(rec); devMeta.set(i.id, rec); } else { del.push(i.id); devMeta.delete(i.id); }
+  }
+  if (put.length) await db.putDevMeta(put);
+  if (del.length) await db.deleteDevMeta(del);
+}
+let delRes = null;
+function deleteDevice(mids) {
+  return new Promise(res => {
+    if (delRes) return res([]);
+    delRes = res;
+    try { AB().deleteMedia(JSON.stringify(mids)); } catch { delRes = null; res([]); }
+  });
+}
+window.__onMediaDeleted = ids => { const r = delRes; delRes = null; if (r) r(Array.isArray(ids) ? ids : []); };
+window.__onMediaPermission = async st => {
+  try { await refreshDevice(); } catch (e) { console.error(e); }
+  render(true);
+  if (permWant && devState === 'partial') toast('Para ver todas tus fotos, actívalo en Ajustes', { label: 'Ajustes', fn: () => AB().openAppSettings() });
+  permWant = false;
+};
+let refT = 0, refBusy = false;
+window.__onMediaChanged = () => {
+  if (!DEV || !booted) return;
+  clearTimeout(refT);
+  refT = setTimeout(async () => {
+    if (refBusy) return; refBusy = true;
+    try { if (await refreshDevice()) render(true); } catch (e) { console.error(e); } finally { refBusy = false; }
+  }, 150);
+};
 function reindex() { byId = new Map(items.map(i => [i.id, i])); }
 const live = () => items.filter(i => !i.trashedAt).sort((a, b) => b.date - a.date);
 const trashed = () => items.filter(i => i.trashedAt).sort((a, b) => b.trashedAt - a.trashedAt);
@@ -46,7 +126,7 @@ function albumCover(name, list) {
 const savePrefs = () => db.setMeta('albumPrefs', aset);
 const AUTO = [{ k: 'recent', name: 'Recientes', icon: 'clock' }, { k: 'fav', name: 'Favoritos', icon: 'heart' }, { k: 'videos', name: 'Vídeos', icon: 'play' }];
 const autoList = k => { const l = live(); return k === 'recent' ? l.filter(i => i.date > Date.now() - 30 * DAY) : k === 'fav' ? l.filter(i => i.favorite) : l.filter(isVideo); };
-const ESSENTIAL = ['camara', 'capturas de pantalla', 'descargas'];
+const ESSENTIAL = ['camara', 'capturas de pantalla', 'descargas', 'camera', 'screenshots', 'download'];
 const isEssential = n => ESSENTIAL.includes(norm(n)) || !!(albums.get(n) && albums.get(n).user);
 const grpOf = n => { const r = albums.get(n); return r && r.group != null && groups.has(r.group) ? r.group : null; };
 const shown = n => { const r = albums.get(n) || {}; return !r.hidden && (!aset.essential || isEssential(n)); };
@@ -69,6 +149,7 @@ function tilesFor(gid) {
 }
 
 async function seed() {
+  if (DEV) return; // en Android no se generan fotos de ejemplo
   if (await db.getMeta('seeded')) return;
   try {
     const { generateSamples } = await import('./samples.js');
@@ -89,9 +170,14 @@ function route() {
 }
 const hashOf = (...p) => '#/' + p.map((x, i) => i ? encodeURIComponent(x) : x).join('/');
 
+const hays = new WeakMap(); // texto de búsqueda en caché (miles de elementos, una pulsación = un recorrido)
 function matches(it, toks) {
-  const d = new Date(it.date);
-  const hay = norm([it.name, it.album, d.toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }), dayLabel(it.date), it.favorite ? 'favorito' : '', isVideo(it) ? 'video' : 'foto imagen'].join(' '));
+  let h = hays.get(it);
+  if (!h || h.f !== it.favorite || h.a !== it.album || h.n !== it.name) {
+    h = { f: it.favorite, a: it.album, n: it.name, t: norm([it.name, it.album, monthName(it.date), dayLabel(it.date), it.favorite ? 'favorito' : '', isVideo(it) ? 'video' : 'foto imagen'].join(' ')) };
+    hays.set(it, h);
+  }
+  const hay = h.t;
   return toks.every(t => hay.includes(t));
 }
 
@@ -143,39 +229,95 @@ function lazy(root) {
   if (!io) io = new IntersectionObserver(es => es.forEach(e => {
     if (!e.isIntersecting) return;
     const img = e.target; io.unobserve(img);
-    const it = byId.get(+img.dataset.id); if (!it) return;
+    const it = byId.get(pid(img.dataset.id)); if (!it) return;
     img.onload = () => img.classList.add('ld');
     img.src = thumbURL(it);
   }), { root: scroll, rootMargin: '900px 0px' });
   root.querySelectorAll('img[data-id]:not([src])').forEach(i => io.observe(i));
 }
 
-function gridHTML(list, v) {
-  if (!list.length) return `<div class="empty">${icon('photo', 48)}<p>${esc(v.empty || '')}</p></div>`;
+// ---------- cuadrícula por fechas virtualizada: solo hay DOM para las filas visibles (+ margen)
+let VG = null;
+const HEAD = 40;
+const firstRow = (rows, y) => { let lo = 0, hi = rows.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (rows[m].y <= y) lo = m; else hi = m - 1; } return lo; };
+const bodyTop = () => body.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop;
+function gridModel(list, v) {
   const L = LEVELS[level], cols = L === 'm' ? 7 : L, mon = L === 'm';
-  const W = scroll.clientWidth || 390, cell = (W - (cols - 1) * 2) / cols;
-  const groups = [];
-  let k = null;
-  for (const it of list) {
-    const kk = v.trash ? 'x' : mon ? monthKey(it.date) : dayKey(it.date);
-    if (kk !== k) { groups.push({ label: v.trash ? '' : mon ? monthLabel(it.date) : dayLabel(it.date), l: [] }); k = kk; }
-    groups[groups.length - 1].l.push(it);
+  const W = body.clientWidth || scroll.clientWidth || 390, cell = (W - (cols - 1) * 2) / cols;
+  const groups = [], rows = [], idRow = new Map();
+  let k = null, y = 0;
+  for (let i = 0; i < list.length; i++) {
+    const it = list[i], kk = v.trash ? 'x' : mon ? monthKey(it.date) : dayKey(it.date);
+    if (kk !== k) { groups.push([i, it.date]); k = kk; }
   }
-  return groups.map(g => {
-    const h = Math.ceil(g.l.length / cols) * (cell + 2) + (g.label ? 40 : 0);
-    return `<section class="sec" style="contain-intrinsic-size:auto ${Math.round(h)}px">${g.label ? `<h3>${esc(g.label)}</h3>` : ''}<div class="grid" style="--cols:${cols}">${g.l.map(it => {
-      const days = v.trash ? Math.max(0, Math.ceil(PURGE_DAYS - (Date.now() - it.trashedAt) / DAY)) : 0;
-      return `<div class="cell${sel.has(it.id) ? ' sel' : ''}" data-id="${it.id}" role="button" aria-label="${esc(it.name)}"><img alt="" draggable="false" data-id="${it.id}">${isVideo(it) ? `<span class="vb">${icon('play', 14)}${it.duration ? `<i>${fmtDur(it.duration)}</i>` : ''}</span>` : ''}${it.favorite ? `<span class="fv">${icon('heart-fill', 14)}</span>` : ''}${v.trash ? `<span class="dl">${days} d</span>` : ''}<i class="ck">${icon('check', 15)}</i></div>`;
-    }).join('')}</div></section>`;
-  }).join('');
+  groups.forEach(([s0, ts], gi) => {
+    const e = gi + 1 < groups.length ? groups[gi + 1][0] : list.length;
+    if (!v.trash) { rows.push({ y, h: HEAD, t: 0, ts }); y += HEAD; }
+    for (let a = s0; a < e; a += cols) {
+      const b = Math.min(e, a + cols);
+      rows.push({ y, h: cell, t: 1, a, b });
+      for (let j = a; j < b; j++) idRow.set(list[j].id, rows.length - 1);
+      y += cell + 2;
+    }
+  });
+  return { rows, idRow, total: y, cols, mon };
 }
-function fillGrid(container, list, v) { container.innerHTML = gridHTML(list, v); lazy(container); }
+function cellHTML(it, v) {
+  const days = v.trash ? Math.max(0, Math.ceil(PURGE_DAYS - (Date.now() - it.trashedAt) / DAY)) : 0;
+  return `<div class="cell${sel.has(it.id) ? ' sel' : ''}" data-id="${it.id}" role="button" aria-label="${esc(it.name)}"><img alt="" draggable="false" loading="lazy" decoding="async" data-id="${it.id}" src="${thumbURL(it)}">${isVideo(it) ? `<span class="vb">${icon('play', 14)}${it.duration ? `<i>${fmtDur(it.duration)}</i>` : ''}</span>` : ''}${it.favorite ? `<span class="fv">${icon('heart-fill', 14)}</span>` : ''}${v.trash ? `<span class="dl">${days} d</span>` : ''}<i class="ck">${icon('check', 15)}</i></div>`;
+}
+function rowHTML(G, i) {
+  const r = G.rows[i];
+  if (r.t === 0) return `<h3 class="vh" data-r="${i}" style="top:${r.y}px">${esc(G.mon ? monthLabel(r.ts) : dayLabel(r.ts))}</h3>`;
+  let h = `<div class="vrow" data-r="${i}" style="top:${r.y}px;height:${r.h}px">`;
+  for (let j = r.a; j < r.b; j++) h += cellHTML(G.list[j], G.v);
+  return h + '</div>';
+}
+function paintGrid() {
+  const G = VG; if (!G) return;
+  const vh = scroll.clientHeight, rel = scroll.getBoundingClientRect().top - body.getBoundingClientRect().top;
+  const buf = vh * (G.cols > 4 ? 0.8 : 1.2);
+  const a = firstRow(G.rows, Math.max(0, rel - buf)), b = firstRow(G.rows, Math.max(0, rel + vh + buf));
+  if (a === G.a && b === G.b) return;
+  G.a = a; G.b = b;
+  for (const [i, e] of G.dom) if (i < a || i > b) { e.remove(); G.dom.delete(i); }
+  let h = '';
+  for (let i = a; i <= b; i++) if (!G.dom.has(i)) h += rowHTML(G, i);
+  if (!h) return;
+  const t = document.createElement('template'); t.innerHTML = h;
+  for (const e of t.content.children) G.dom.set(+e.dataset.r, e);
+  body.append(t.content);
+}
+function setGrid(list, v) {
+  VG = null; body.textContent = ''; body.style.height = ''; body.classList.remove('vbody');
+  if (!list.length) { body.innerHTML = `<div class="empty">${icon('photo', 48)}<p>${esc(v.empty || '')}</p></div>`; return; }
+  const m = gridModel(list, v);
+  VG = { ...m, list, v, dom: new Map(), a: -1, b: -2 };
+  body.classList.add('vbody'); body.style.height = m.total + 'px'; body.style.setProperty('--cols', m.cols);
+  paintGrid();
+}
+// Elemento de referencia para conservar la posición de scroll al volver a pintar.
+function gridAnchor() {
+  if (!VG) return null;
+  const rel = scroll.scrollTop - bodyTop();
+  let i = firstRow(VG.rows, Math.max(0, rel));
+  if (VG.rows[i].t === 0 && VG.rows[i + 1]) i++;
+  const r = VG.rows[i];
+  return r.t ? { id: VG.list[r.a].id, off: r.y - rel } : null;
+}
+function gridRestore(a) {
+  if (!a || !VG || !VG.idRow.has(a.id)) return false;
+  scroll.scrollTop = bodyTop() + VG.rows[VG.idRow.get(a.id)].y - a.off;
+  return true;
+}
+body.addEventListener('load', e => { if (e.target.tagName === 'IMG') e.target.classList.add('ld'); }, true);
 
 function render(keep) {
   const r = route(), key = location.hash;
   if (selecting && key !== lastKey) exitSelect();
   const sameKey = key === lastKey;
   const top = keep && sameKey ? scroll.scrollTop : 0;
+  const anchor = keep && sameKey ? gridAnchor() : null;
   lastKey = key;
   const v = view = buildView(r);
   app.dataset.view = v.name;
@@ -196,20 +338,35 @@ function render(keep) {
     const inp = extra.querySelector('input'); let t;
     inp.addEventListener('input', () => {
       query = inp.value; clearTimeout(t);
-      t = setTimeout(() => { view = buildView(route()); fillGrid(body, view.items, view); }, 120);
+      t = setTimeout(() => { view = buildView(route()); setGrid(view.items, view); }, 120);
     });
     setTimeout(() => inp.focus(), 50);
   }
   if (v.type === 'albums' && v.gid == null) extra.innerHTML = `<div class="seg ess">${[[0, 'Ver todo'], [1, 'Solo esenciales']].map(([k, n]) => `<button data-ess="${k}" class="${!!k === aset.essential ? 'on' : ''}">${n}</button>`).join('')}</div>`;
+  if (DEV && devState === 'partial' && v.name === 'images') extra.insertAdjacentHTML('beforeend', `<div class="banner"><span>Solo tienes acceso a algunas fotos.</span><button data-perm>Permitir todas</button></div>`);
+  VG = null; body.classList.remove('vbody'); body.style.height = '';
   if (v.type === 'albums') body.innerHTML = albumsHTML(v.gid);
   else if (v.type === 'albumvis') body.innerHTML = visHTML();
   else if (v.type === 'stories') body.innerHTML = storiesHTML();
-  else { body.innerHTML = ''; fillGrid(body, v.items, v); }
+  else setGrid(v.items, v);
   if (v.type !== 'grid' && v.type !== 'search') lazy(body);
   if (selecting) { buildActionBar(); updateSel(); }
   scroll.scrollTop = top;
+  if (anchor) gridRestore(anchor);
+  renderPerm();
   onScroll();
 }
+function renderPerm() {
+  const p = $('#perm'), need = DEV && devState === 'none' && !items.length;
+  p.hidden = !need;
+  if (!need) { p.innerHTML = ''; return; }
+  if (p.firstChild) { p.querySelector('[data-pset]').hidden = !permAsked; return; }
+  p.innerHTML = `${icon('photo', 64)}<h2>Permite el acceso a tus fotos</h2><p>Galería muestra las fotos y vídeos de tu teléfono sin copiarlos ni sacarlos de él.</p><button class="big" data-pgo>Permitir acceso</button><button class="big sec" data-pset ${permAsked ? '' : 'hidden'}>Abrir ajustes</button>`;
+}
+$('#perm').addEventListener('click', e => {
+  if (e.target.closest('[data-pgo]')) { permAsked = true; AB().requestMediaPermission(); }
+  else if (e.target.closest('[data-pset]')) AB().openAppSettings();
+});
 
 function albumsHTML(gid) {
   const ck = '<i class="ck">' + icon('check', 15) + '</i>';
@@ -242,6 +399,7 @@ function onScroll() {
   if (raf) return;
   raf = requestAnimationFrame(() => {
     raf = 0;
+    paintGrid();
     const p = Math.min(1, scroll.scrollTop / 70), lt = $('#lt');
     lt.style.opacity = 1 - p;
     lt.style.transform = `translateY(${-p * 10}px) scale(${1 - p * 0.18})`;
@@ -251,6 +409,7 @@ function onScroll() {
 }
 scroll.addEventListener('scroll', onScroll, { passive: true });
 $('#lt-extra').addEventListener('click', e => {
+  if (e.target.closest('[data-perm]')) { permAsked = permWant = true; AB().requestMediaPermission(); return; }
   const b = e.target.closest('[data-ess]'); if (!b) return;
   aset.essential = b.dataset.ess === '1'; savePrefs(); render(true);
 });
@@ -277,10 +436,7 @@ function setLevel(n) {
   const id = cell && cell.dataset.id, off = cell ? cell.getBoundingClientRect().top - sr.top : 0;
   level = n; ls.set('gal.level', n);
   render(true);
-  if (id) {
-    const nc = scroll.querySelector(`.cell[data-id="${id}"]`);
-    if (nc) scroll.scrollTop += nc.getBoundingClientRect().top - scroll.getBoundingClientRect().top - off;
-  }
+  if (id && VG && VG.idRow.has(pid(id))) { scroll.scrollTop = bodyTop() + VG.rows[VG.idRow.get(pid(id))].y - off; paintGrid(); }
 }
 let wheelT = 0;
 scroll.addEventListener('wheel', e => {
@@ -290,7 +446,7 @@ scroll.addEventListener('wheel', e => {
 }, { passive: false });
 
 // ---------- selection & grid gestures
-const idOf = c => +c.dataset.id;
+const idOf = c => pid(c.dataset.id);
 function setSel(cell, on) {
   const id = idOf(cell);
   if (on) sel.add(id); else sel.delete(id);
@@ -321,6 +477,7 @@ function updateSel() {
     return;
   }
   const n = sel.size;
+  const sv = $('#actionbar [data-k=save]'); if (sv) sv.hidden = n > 0 && selItems().every(i => i.dev);
   $('#sel-count').textContent = n ? (n === 1 ? '1 seleccionado' : n + ' seleccionados') : 'Seleccionar elementos';
   $('#sel-all').classList.toggle('on', n > 0 && n === view.items.length);
   $('#actionbar').classList.toggle('empty', n === 0);
@@ -332,7 +489,7 @@ function buildActionBar() {
   }
   const T = view.trash;
   const rows = T ? [['restore', 'restore', 'Restaurar'], ['trash', 'trash', 'Eliminar']]
-    : [['share', 'share', 'Compartir'], ['save', 'download', 'Guardar'], ['trash', 'trash', 'Eliminar'], ['album', 'plus', 'Álbum'], ['fav', 'heart', 'Favorito']];
+    : [['share', 'share', 'Compartir'], ...(DEV && !items.some(i => !i.dev) ? [] : [['save', 'download', 'Guardar']]), ['trash', 'trash', 'Eliminar'], ['album', 'plus', 'Álbum'], ['fav', 'heart', 'Favorito']];
   $('#actionbar').innerHTML = rows.map(r => `<button data-k="${r[0]}">${icon(r[1], 24)}<span>${r[2]}</span></button>`).join('');
 }
 $('#actionbar').addEventListener('click', async e => {
@@ -345,7 +502,7 @@ $('#actionbar').addEventListener('click', async e => {
   else if (k === 'trash') { if (view.trash) { if (await confirmDelete(l)) { await exitSelect(); await destroy(l); } } else { await exitSelect(); await trashItems(l); } }
   else if (k === 'restore') { await exitSelect(); await restore(l); }
   else if (k === 'album') { if (await addToAlbum(l)) await exitSelect(); }
-  else if (k === 'fav') { const on = !l.every(i => i.favorite); l.forEach(i => i.favorite = on); await db.putItems(l); toast(on ? 'Añadido a favoritos' : 'Quitado de favoritos'); await exitSelect(); render(true); }
+  else if (k === 'fav') { const on = !l.every(i => i.favorite); l.forEach(i => i.favorite = on); await saveItems(l); toast(on ? 'Añadido a favoritos' : 'Quitado de favoritos'); await exitSelect(); render(true); }
 });
 $('#sel-close').onclick = () => exitSelect();
 $('#sel-all').onclick = () => {
@@ -501,37 +658,48 @@ $('#sel-all').onclick = () => {
 async function trashItems(list) {
   const t = Date.now();
   list.forEach(i => { i.trashedAt = t; });
-  await db.putItems(list);
+  await saveItems(list);
   render(true);
   toast(list.length === 1 ? 'Movido a la papelera' : `${list.length} elementos movidos a la papelera`, { label: 'Deshacer', fn: () => restore(list, true) });
 }
 async function restore(list, quiet) {
   list.forEach(i => { i.trashedAt = null; });
-  await db.putItems(list);
+  await saveItems(list);
   render(true);
   if (!quiet) toast(list.length === 1 ? 'Elemento restaurado' : `${list.length} elementos restaurados`);
 }
-const confirmDelete = l => dialog({ title: 'Eliminar definitivamente', message: `${plural(l.length, 'elemento se eliminará', 'elementos se eliminarán')} para siempre. Esta acción no se puede deshacer.`, ok: 'Eliminar', danger: true });
+const confirmDelete = l => dialog({ title: 'Eliminar definitivamente', message: `${plural(l.length, 'elemento se eliminará', 'elementos se eliminarán')} para siempre.${l.some(i => i.dev) ? ' Android te pedirá confirmación.' : ''} Esta acción no se puede deshacer.`, ok: 'Eliminar', danger: true });
 async function destroy(list) {
-  const ids = new Set(list.map(i => i.id));
-  await db.deleteItems([...ids]);
-  items = items.filter(i => !ids.has(i.id));
-  ids.forEach(dropThumbURL);
-  reindex(); render(true);
-  toast('Eliminado definitivamente');
+  const gone = new Set(), loc = list.filter(i => !i.dev), dv = list.filter(i => i.dev);
+  if (loc.length) { await db.deleteItems(loc.map(i => i.id)); loc.forEach(i => { gone.add(i.id); dropThumbURL(i.id); }); }
+  if (dv.length) {
+    // solo se quitan del modelo los ids que el sistema confirma como borrados
+    const del = await deleteDevice(dv.map(i => i.mid));
+    const ok = dv.filter(i => del.includes(i.mid));
+    ok.forEach(i => { gone.add(i.id); devMeta.delete(i.id); });
+    if (ok.length) db.deleteDevMeta(ok.map(i => i.id)).catch(() => {});
+  }
+  if (gone.size) { items = items.filter(i => !gone.has(i.id)); reindex(); }
+  render(true);
+  toast(gone.size ? 'Eliminado definitivamente' : 'No se eliminó nada');
+  return gone.size === list.length;
 }
 async function emptyTrash() {
   const l = trashed(); if (!l.length) return toast('La papelera está vacía');
   if (await confirmDelete(l)) destroy(l);
 }
-function fileName(it) {
-  const ext = (it.blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg').split('+')[0];
+function fileName(it, blob = it.blob) {
+  const ext = (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg').split('+')[0];
   return /\.[a-z0-9]{2,4}$/i.test(it.name) ? it.name : it.name + '.' + ext;
 }
-const AB = () => window.AndroidBridge;
 async function share(list) {
   if (AB()) {
-    try { const ids = []; for (const i of list) ids.push(await bridgeStage(i.blob, fileName(i))); AB().shareFiles(JSON.stringify(ids)); } catch (e) { toast('No se pudo compartir'); }
+    if (list.every(i => i.dev) && AB().shareMedia) { AB().shareMedia(JSON.stringify(list.map(i => i.mid))); return; }
+    try {
+      const ids = [];
+      for (const i of list) { const b = i.dev ? await (await fetch(i.fullUrl)).blob() : i.blob; ids.push(await bridgeStage(b, fileName(i, b))); }
+      AB().shareFiles(JSON.stringify(ids));
+    } catch (e) { toast('No se pudo compartir'); }
     return;
   }
   const files = list.map(i => new File([i.blob], fileName(i), { type: i.blob.type }));
@@ -548,6 +716,8 @@ function download(files) {
   }, k * 250));
 }
 async function saveFiles(list) {
+  list = list.filter(i => !i.dev); // las del dispositivo ya están en él
+  if (!list.length) return;
   if (AB()) {
     try { for (const i of list) AB().saveFile(await bridgeStage(i.blob, fileName(i))); toast(list.length === 1 ? 'Guardado en Pictures/Galería' : `${list.length} elementos guardados en Pictures/Galería`); } catch (e) { toast('No se pudo guardar'); }
     return;
@@ -567,7 +737,7 @@ function addToAlbum(list) {
     let mode = 'move', done = false;
     const c = el('div');
     const names = [...albumNames()];
-    c.innerHTML = `<div class="seg"><button data-m="move" class="on">Mover</button><button data-m="copy">Copiar</button></div><div class="rows"><button class="row" data-n="">${'<span class="ri">' + icon('plus', 22) + '</span>'}<span class="rl">Álbum nuevo</span></button>${names.map(([n, l], i) => `<button class="row" data-i="${i}"><span class="ri alb-t">${l[0] ? `<img alt="" src="${thumbURL(l[0])}">` : icon('album', 22)}</span><span class="rl">${esc(n)}</span><span class="rn">${l.length}</span></button>`).join('')}</div>`;
+    c.innerHTML = `<div class="seg"${list.every(i => i.dev) ? ' hidden' : ''}><button data-m="move" class="on">Mover</button><button data-m="copy">Copiar</button></div>${list.some(i => i.dev) ? '<p class="hint">Las fotos del dispositivo no se mueven de su carpeta: el álbum solo cambia dentro de la app.</p>' : ''}<div class="rows"><button class="row" data-n="">${'<span class="ri">' + icon('plus', 22) + '</span>'}<span class="rl">Álbum nuevo</span></button>${names.map(([n, l], i) => `<button class="row" data-i="${i}"><span class="ri alb-t">${l[0] ? `<img alt="" src="${thumbURL(l[0])}">` : icon('album', 22)}</span><span class="rl">${esc(n)}</span><span class="rn">${l.length}</span></button>`).join('')}</div>`;
     const s = sheet({ title: 'Añadir a álbum', content: c, onClose: () => { if (!done) res(false); } });
     c.addEventListener('click', async e => {
       const m = e.target.closest('[data-m]');
@@ -584,10 +754,13 @@ function addToAlbum(list) {
 }
 async function applyAlbum(list, name, mode) {
   if (!albums.has(name) && !live().some(i => i.album === name)) { const a = { name }; albums.set(name, a); await db.putAlbum(a); }
-  if (mode === 'copy') {
-    const cp = list.map(i => ({ ...i, id: undefined, album: name, trashedAt: null }));
+  const dv = list.filter(i => i.dev), loc = list.filter(i => !i.dev);
+  if (mode === 'copy' && loc.length) {
+    const cp = loc.map(i => ({ ...i, id: undefined, album: name, trashedAt: null }));
     await db.putItems(cp); items.push(...cp); reindex();
-  } else { list.forEach(i => { i.album = name; }); await db.putItems(list); }
+  } else loc.forEach(i => { i.album = name; });
+  dv.forEach(i => { i.album = name; }); // las del dispositivo no se copian: solo cambia el álbum en la app
+  await saveItems(mode === 'copy' ? dv : list);
   render(true);
   toast(`${mode === 'copy' ? 'Copiado' : 'Movido'} a «${name}»`);
 }
@@ -626,7 +799,7 @@ async function renameAlbum(name) {
   if (albumNames().has(n)) { toast('Ya existe un álbum con ese nombre'); return null; }
   const l = items.filter(i => i.album === name);
   l.forEach(i => { i.album = n; });
-  await db.putItems(l);
+  await saveItems(l);
   const a = albums.get(name); albums.delete(name); await db.deleteAlbum(name);
   const na = { ...(a || {}), name: n }; albums.set(n, na); await db.putAlbum(na);
   return n;
@@ -638,7 +811,7 @@ async function removeTiles(keys) {
   const msg = [cnt ? `${plural(cnt, 'elemento pasará', 'elementos pasarán')} a la papelera.` : '', gids.length ? 'Los álbumes de los grupos volverán a la raíz.' : ''].filter(Boolean).join(' ') || (names.length ? 'El álbum está vacío.' : '');
   if (!(await dialog({ title: gids.length && !names.length ? 'Eliminar grupo' : 'Eliminar', message: msg, ok: 'Eliminar', danger: true }))) return false;
   const t = Date.now(), moved = lists.flat();
-  if (moved.length) { moved.forEach(i => { i.trashedAt = t; }); await db.putItems(moved); }
+  if (moved.length) { moved.forEach(i => { i.trashedAt = t; }); await saveItems(moved); }
   for (const n of names) { albums.delete(n); await db.deleteAlbum(n); }
   for (const id of gids) {
     for (const [n, a] of albums) if (a.group === id) { delete a.group; await db.putAlbum(a); }
@@ -671,7 +844,7 @@ function pickCover(name) {
   const s = sheet({ title: 'Elegir portada', content: c });
   c.onclick = async e => {
     const b = e.target.closest('button'); if (!b) return;
-    await s.close(); await putAlb(name, a => { a.cover = +b.dataset.id; });
+    await s.close(); await putAlb(name, a => { a.cover = pid(b.dataset.id); });
     render(true); toast('Portada actualizada');
   };
 }
@@ -722,9 +895,9 @@ function albumMenu(name, list) {
 
 const A = {
   get inTrash() { return route().name === 'trash'; },
-  async fav(it) { it.favorite = !it.favorite; await db.putItem(it); render(true); },
+  async fav(it) { it.favorite = !it.favorite; await saveItems([it]); render(true); },
   async trash(it) {
-    if (this.inTrash) { if (!(await confirmDelete([it]))) return false; await destroy([it]); return true; }
+    if (this.inTrash) { if (!(await confirmDelete([it]))) return false; return destroy([it]); }
     await trashItems([it]); return true;
   },
   async restore(it) { await restore([it]); },
@@ -742,23 +915,29 @@ const A = {
     it.name = n; await db.putItem(it); render(true);
   },
   details(it) {
-    const rows = [['Nombre', it.name], ['Fecha', fmtDateTime(it.date)], ['Tamaño', fmtSize(it.blob.size)],
+    const rows = [['Nombre', it.name], ['Fecha', fmtDateTime(it.date)], ['Tamaño', fmtSize(it.dev ? it.size : it.blob.size)],
       ['Resolución', it.width ? `${it.width} × ${it.height} (${(it.width * it.height / 1e6).toFixed(1)} MP)` : 'Desconocida'],
-      ['Tipo', it.blob.type || '—'], ['Álbum', it.album || '—']];
+      ['Tipo', (it.dev ? it.mime : it.blob.type) || '—'], ['Álbum', it.album || '—']];
     sheet({ title: 'Detalles', content: el('div', 'details', rows.map(r => `<div><span>${r[0]}</span><b>${esc(r[1])}</b></div>`).join('')) });
   },
   async edit(it, done) {
     if (isVideo(it)) return toast('No se pueden editar vídeos');
+    let src = it.blob;
+    if (it.dev) { try { src = await (await fetch(it.fullUrl)).blob(); } catch { return toast('No se pudo abrir la foto'); } }
     let openEditor;
     try { ({ openEditor } = await import('./editor.js')); } catch { return toast('Editor no disponible'); }
     // El editor es una entrada de historial propia: «atrás» = cancelar (con confirmación si hay cambios).
     let ed = null;
     const guard = pushOverlay(() => { if (ed) ed.abort(); }, () => !!(ed && ed.blocked()));
-    ed = openEditor(it.blob, {
+    ed = openEditor(src, {
       async onSave(blob) {
         dismiss(guard);
-        const m = await makeThumb(blob);
         const base = it.name.replace(/\.[a-z0-9]{2,4}$/i, '');
+        if (it.dev) { // copia nueva en el dispositivo (MediaStore); aparecerá sola en la lista
+          try { AB().saveFile(await bridgeStage(blob, base + ' (editado).' + (blob.type.split('/')[1] || 'jpg').replace('jpeg', 'jpg'))); toast('Copia editada guardada en el dispositivo'); } catch { toast('No se pudo guardar'); }
+          return;
+        }
+        const m = await makeThumb(blob);
         const n = { blob, thumb: m.thumb, name: base + ' (editado)', date: Date.now(), album: it.album, width: m.width, height: m.height, favorite: false, trashedAt: null };
         await db.putItem(n); items.push(n); reindex(); render(true);
         toast('Copia editada guardada');
@@ -790,7 +969,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 function settings() {
   const c = el('div', 'settings'), cur = ls.get('gal.theme') || 'system';
   c.innerHTML = `<div class="lbl">Tema</div><div class="seg">${[['system', 'Sistema'], ['light', 'Claro'], ['dark', 'Oscuro']].map(([k, n]) => `<button data-t="${k}" class="${k === cur ? 'on' : ''}">${n}</button>`).join('')}</div>
-    <button class="row" data-x="samples"><span class="ri">${icon('photo', 22)}</span><span class="rl">Añadir fotos de ejemplo</span></button>
+    ${DEV ? '' : `<button class="row" data-x="samples"><span class="ri">${icon('photo', 22)}</span><span class="rl">Añadir fotos de ejemplo</span></button>`}
     <p class="hint">Galería · ${plural(items.length, 'elemento', 'elementos')} guardados en este dispositivo</p>`;
   c.addEventListener('click', async e => {
     const t = e.target.closest('[data-t]');
@@ -818,6 +997,8 @@ $('#file-input').addEventListener('change', async e => {
 });
 
 // ---------- boot
+let lastW = 0;
+addEventListener('resize', () => { const w = scroll.clientWidth; if (w !== lastW) { lastW = w; if (VG) render(true); } });
 addEventListener('hashchange', () => { if (location.hash !== lastKey) render(); });
 addEventListener('keydown', e => { if (e.key === 'Escape' && selecting) exitSelect(); });
 document.querySelectorAll('[data-icon]').forEach(e => { e.innerHTML = icon(e.dataset.icon, e.classList.contains('ti') ? 24 : 24); });
@@ -827,10 +1008,12 @@ window.__galleryCanGoBack = () => overlayCount() > 0 || !['', '#', '#/', '#/imag
 (async function boot() {
   try {
     await seed(); await load();
+    if (DEV) await refreshDevice();
   } catch (e) { console.error(e); }
   render();
   $('#boot').classList.add('gone');
-  const noDur = items.filter(i => isVideo(i) && i.duration == null);
+  booted = true;
+  const noDur = items.filter(i => !i.dev && isVideo(i) && i.duration == null);
   if (noDur.length) (async () => { for (const i of noDur) i.duration = await probeDuration(i.blob); await db.putItems(noDur); render(true); })();
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 })();

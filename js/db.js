@@ -2,14 +2,15 @@
 let dbp;
 function open() {
   return dbp ||= new Promise((res, rej) => {
-    const r = indexedDB.open('galeria', 2);
+    const r = indexedDB.open('galeria', 3);
     r.onupgradeneeded = () => {
-      // Migración segura: solo crea lo que falta; los datos existentes no se tocan (v1 -> v2 añade 'groups').
+      // Migración segura: solo crea lo que falta; los datos existentes no se tocan (v1 -> v2 añade 'groups', v2 -> v3 añade 'devmeta').
       const d = r.result, has = n => d.objectStoreNames.contains(n);
       if (!has('items')) d.createObjectStore('items', { keyPath: 'id', autoIncrement: true });
       if (!has('albums')) d.createObjectStore('albums', { keyPath: 'name' });
       if (!has('meta')) d.createObjectStore('meta', { keyPath: 'key' });
       if (!has('groups')) d.createObjectStore('groups', { keyPath: 'id', autoIncrement: true });
+      if (!has('devmeta')) d.createObjectStore('devmeta', { keyPath: 'id' });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -49,3 +50,7 @@ export async function putItems(arr) {
 }
 export const putItem = async it => (await putItems([it]))[0].id;
 export const deleteItems = ids => run('items', 'readwrite', s => { ids.forEach(i => s.delete(i)); });
+// Metadatos de la app para fotos del dispositivo (solo lectura): { id:'dev:i1', favorite, trashedAt, album }
+export const getDevMeta = () => run('devmeta', 'readonly', s => s.getAll());
+export const putDevMeta = arr => run('devmeta', 'readwrite', s => { arr.forEach(r => s.put(r)); });
+export const deleteDevMeta = ids => run('devmeta', 'readwrite', s => { ids.forEach(i => s.delete(i)); });

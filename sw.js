@@ -2,7 +2,7 @@
 // Estrategia: cache-first para recursos del mismo origen (app shell y tiempo de ejecución),
 // con red como respaldo y guardado en caché de lo que se vaya cargando.
 
-const VERSION = "v2";
+const VERSION = "v3";
 const CACHE_PREFIX = "galeria-";
 const CACHE_NAME = `${CACHE_PREFIX}${VERSION}`;
 
@@ -59,6 +59,8 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  // Las fotos del dispositivo (/media/*) las sirve el host nativo: nunca se cachean aquí.
+  if (url.pathname.startsWith("/media/")) return;
 
   event.respondWith(handleRequest(request));
 });

@@ -17,7 +17,7 @@ export function openViewer({ list, index, A }) {
   const q = s => root.querySelector(s);
   const stage = q('.v-stage'), track = q('.v-track'), strip = q('.v-strip');
   const urls = new Map();
-  const full = it => { let u = urls.get(it.id); if (!u) { u = URL.createObjectURL(it.blob); urls.set(it.id, u); } return u; };
+  const full = it => { if (it.dev) return it.fullUrl; let u = urls.get(it.id); if (!u) { u = URL.createObjectURL(it.blob); urls.set(it.id, u); } return u; };
   const panels = [0, 1, 2].map(k => { const p = el('div', 'v-panel'); p.style.left = k * 100 + '%'; track.append(p); return p; });
   let s = 1, tx = 0, ty = 0, dx = 0, animating = false, closed = false;
   const cur = () => items[idx];
@@ -34,7 +34,10 @@ export function openViewer({ list, index, A }) {
         p.innerHTML = `<video controls playsinline preload="metadata" src="${full(it)}" poster="${thumbURL(it)}"></video>`;
       } else {
         const i = new Image(); i.draggable = false; i.decoding = 'async';
-        i.src = isVideo(it) ? thumbURL(it) : full(it);
+        if (it.dev) { // miniatura al instante y, para la actual, se cambia por el original al decodificarlo
+          i.src = thumbURL(it);
+          if (k === 1 && !isVideo(it)) { const f = new Image(); f.decoding = 'async'; f.src = full(it); f.decode().then(() => { if (i.isConnected && !closed) i.src = f.src; }).catch(() => {}); }
+        } else i.src = isVideo(it) ? thumbURL(it) : full(it);
         p.append(i);
       }
     });
@@ -189,10 +192,10 @@ export function openViewer({ list, index, A }) {
     else if (a === 'more') {
       menuSheet(inTrash ? [{ icon: 'info', label: 'Detalles', fn: () => A.details(it) }] : [
         { icon: 'info', label: 'Detalles', fn: () => A.details(it) },
-        { icon: 'download', label: 'Guardar en el dispositivo', fn: () => A.save(it) },
+        it.dev ? null : { icon: 'download', label: 'Guardar en el dispositivo', fn: () => A.save(it) },
         { icon: 'plus', label: 'Añadir a álbum', fn: () => A.album(it) },
         { icon: 'photo', label: 'Establecer como portada', fn: () => A.cover(it) },
-        { icon: 'edit', label: 'Cambiar nombre', fn: async () => { await A.rename(it); updateChrome(); } },
+        it.dev ? null : { icon: 'edit', label: 'Cambiar nombre', fn: async () => { await A.rename(it); updateChrome(); } },
       ]);
     }
   });

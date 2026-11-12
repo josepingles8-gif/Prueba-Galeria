@@ -8,15 +8,18 @@ export const ls = {
 const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
 export const dayKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate(); };
 export const monthKey = ts => { const d = new Date(ts); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); };
+// Formateadores reutilizados: crear Intl.DateTimeFormat por llamada es muy lento con miles de elementos.
+const F_DAY = new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'long' });
+const F_DAYY = new Intl.DateTimeFormat('es-ES', { day: 'numeric', month: 'long', year: 'numeric' });
+const F_MON = new Intl.DateTimeFormat('es-ES', { month: 'long', year: 'numeric' });
 export function dayLabel(ts) {
   const d = new Date(ts), n = new Date();
   if (dayKey(d) === dayKey(n)) return 'Hoy';
   if (dayKey(d) === dayKey(new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1))) return 'Ayer';
-  const o = { day: 'numeric', month: 'long' };
-  if (d.getFullYear() !== n.getFullYear()) o.year = 'numeric';
-  return d.toLocaleDateString('es-ES', o);
+  return (d.getFullYear() !== n.getFullYear() ? F_DAYY : F_DAY).format(d);
 }
-export const monthLabel = ts => cap(new Date(ts).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' }));
+export const monthLabel = ts => cap(F_MON.format(new Date(ts)));
+export const monthName = ts => F_MON.format(new Date(ts));
 export const fmtDateTime = ts => new Date(ts).toLocaleString('es-ES', { dateStyle: 'long', timeStyle: 'short' });
 export const fmtTime = ts => new Date(ts).toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
 export function fmtSize(b) {
@@ -24,11 +27,12 @@ export function fmtSize(b) {
   if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
   return (b / 1048576).toFixed(1) + ' MB';
 }
-export const isVideo = it => (it.blob && it.blob.type || '').startsWith('video/');
+export const isVideo = it => (it.dev ? it.mime || '' : it.blob && it.blob.type || '').startsWith('video/');
 export const plural = (n, a, b) => n + ' ' + (n === 1 ? a : b);
 
 const urls = new Map();
 export function thumbURL(it) {
+  if (it.dev) return it.thumbUrl; // foto del dispositivo: la sirve el host nativo
   let u = urls.get(it.id);
   if (!u) { u = URL.createObjectURL(it.thumb || it.blob); urls.set(it.id, u); }
   return u;

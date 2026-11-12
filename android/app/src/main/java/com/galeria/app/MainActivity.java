@@ -2,6 +2,10 @@ package com.galeria.app;
 
 import android.annotation.SuppressLint;
 import android.content.Intent;
+import android.content.IntentSender;
+import android.database.ContentObserver;
+import android.os.Handler;
+import android.os.Looper;
 import android.graphics.Bitmap;
 import android.graphics.Color;
 import android.net.Uri;
@@ -21,6 +25,7 @@ import android.widget.FrameLayout;
 import androidx.activity.ComponentActivity;
 import androidx.activity.OnBackPressedCallback;
 import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.IntentSenderRequest;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -42,7 +47,14 @@ public class MainActivity extends ComponentActivity {
     private ValueCallback<Uri[]> filePathCallback;
     private ActivityResultLauncher<Intent> fileChooserLauncher;
     private ActivityResultLauncher<String> storagePermissionLauncher;
+    private ActivityResultLauncher<String[]> mediaPermissionLauncher;
+    private ActivityResultLauncher<IntentSenderRequest> intentSenderLauncher;
     private AndroidBridge bridge;
+    private MediaApi media;
+    private ContentObserver mediaObserver;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Runnable notifyMedia = () -> callJs(
+            "window.__onMediaChanged&&window.__onMediaChanged()");
 
     @SuppressLint({"SetJavaScriptEnabled", "AddJavascriptInterface"})
     @Override
@@ -97,6 +109,25 @@ public class MainActivity extends ComponentActivity {
         storagePermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
                 granted -> bridge.onStoragePermissionResult(granted));
+
+        mediaPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestMultiplePermissions(),
+                result -> callJs("window.__onMediaPermission&&window.__onMediaPermission('"
+                        + MediaApi.permissionState(this) + "')"));
+        intentSenderLauncher = registerForActivityResult(
+                new ActivityResultContracts.StartIntentSenderForResult(),
+                result -> bridge.onDeleteResult(result.getResultCode() == RESULT_OK));
+        media = new MediaApi(this);
+        // Cambios en MediaStore (fotos nuevas/borradas) -> avisa a la web, con 1 s de antirrebote.
+        mediaObserver = new ContentObserver(mainHandler) {
+            @Override
+            public void onChange(boolean selfChange) {
+                mainHandler.removeCallbacks(notifyMedia);
+                mainHandler.postDelayed(notifyMedia, 1000);
+            }
+        };
+        getContentResolver().registerContentObserver(MediaApi.IMAGES, true, mediaObserver);
+        getContentResolver().registerContentObserver(MediaApi.VIDEOS, true, mediaObserver);
 
         configureWebView();
 
@@ -155,7 +186,13 @@ public class MainActivity extends ComponentActivity {
         webView.setWebViewClient(new WebViewClient() {
             @Override
             public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-                return loader.shouldInterceptRequest(request.getUrl());
+                Uri u = request.getUrl();
+                String p = u.getPath();
+                if (HOST.equals(u.getHost()) && p != null && p.startsWith(MediaApi.PREFIX)) {
+                    WebResourceResponse r = media.handle(request);
+                    if (r != null) return r;
+                }
+                return loader.shouldInterceptRequest(u);
             }
 
             @Override
@@ -276,6 +313,25 @@ public class MainActivity extends ComponentActivity {
                 android.Manifest.permission.WRITE_EXTERNAL_STORAGE));
     }
 
+    void requestMediaPermission() {
+        runOnUiThread(() -> mediaPermissionLauncher.launch(MediaApi.permissionsToRequest()));
+    }
+
+    void launchIntentSender(IntentSender sender) {
+        runOnUiThread(() -> {
+            try {
+                intentSenderLauncher.launch(new IntentSenderRequest.Builder(sender).build());
+            } catch (Exception e) {
+                bridge.onDeleteResult(false);
+            }
+        });
+    }
+
+    /** Ejecuta JS en la pagina (cualquier hilo). */
+    void callJs(String js) {
+        runOnUiThread(() -> { if (webView != null) webView.evaluateJavascript(js, null); });
+    }
+
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
@@ -292,6 +348,7 @@ public class MainActivity extends ComponentActivity {
     protected void onResume() {
         super.onResume();
         webView.onResume();
+        callJs("window.__onMediaChanged&&window.__onMediaChanged()");
     }
 
     @Override
@@ -300,6 +357,8 @@ public class MainActivity extends ComponentActivity {
             filePathCallback.onReceiveValue(null);
             filePathCallback = null;
         }
+        mainHandler.removeCallbacks(notifyMedia);
+        if (mediaObserver != null) getContentResolver().unregisterContentObserver(mediaObserver);
         if (isFinishing()) bridge.cleanup();
         root.removeAllViews();
         webView.destroy();
