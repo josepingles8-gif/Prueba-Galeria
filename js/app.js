@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
 import { el, esc, norm, ls, dayKey, dayLabel, monthKey, monthLabel, fmtDateTime, fmtSize, isVideo, plural, thumbURL, dropThumbURL, makeThumb, fmtDur, probeDuration, bridgeStage, monthName } from './util.js';
-import { pushOverlay, dismiss, overlayCount, sheet, menuSheet, dialog, toast } from './ui.js';
+import { pushOverlay, dismiss, overlayCount, sheet, menuSheet, popover, dialog, toast } from './ui.js';
 import { openViewer } from './viewer.js';
 
 const $ = s => document.querySelector(s);
@@ -181,8 +181,12 @@ function matches(it, toks) {
   return toks.every(t => hay.includes(t));
 }
 
+let origin = null; // pantalla de la que se abrió un tipo (Álbumes / Colecciones)
+const isShot = i => ['capturas de pantalla', 'screenshots', 'screenshot'].includes(norm(i.album));
 function buildView(r) {
   const n = r.name, v = { name: n, type: 'grid', parent: null, actions: [], items: [], sub: '' };
+  if (n === 'albums') origin = '#/albums'; else if (n === 'collections') origin = '#/collections'; else if (n === 'images' || n === '' || n === 'trash') origin = null;
+  const tabOf = () => origin === '#/albums' ? 'albums' : origin === '#/collections' ? 'collections' : undefined;
   const search = { icon: 'search', label: 'Buscar', fn: () => { location.hash = '#/search'; } };
   const cols = { cols: true };
   if (n === 'albums') {
@@ -195,19 +199,21 @@ function buildView(r) {
   } else if (n === 'albumvis') {
     Object.assign(v, { title: 'Álbumes a mostrar', type: 'albumvis', tab: 'albums', parent: '#/albums', sub: 'Los álbumes ocultos siguen apareciendo en Imágenes' });
   } else if (n === 'recent') {
-    Object.assign(v, { title: 'Recientes', items: autoList('recent'), parent: '#/albums', tab: 'albums', actions: [cols], empty: 'No hay elementos recientes' });
-  } else if (n === 'stories') {
-    Object.assign(v, { title: 'Historias', type: 'stories', tab: 'stories', actions: [search] });
+    Object.assign(v, { title: 'Recientes', items: autoList('recent'), parent: origin || '#/albums', tab: origin === '#/collections' ? 'collections' : 'albums', actions: [cols], empty: 'No hay elementos recientes' });
+  } else if (n === 'collections') {
+    Object.assign(v, { title: 'Colecciones', type: 'collections', tab: 'collections', actions: [search] });
   } else if (n === 'album') {
     const l = live().filter(i => i.album === r.arg);
     Object.assign(v, { title: r.arg, items: l, parent: grpOf(r.arg) != null ? hashOf('group', String(grpOf(r.arg))) : '#/albums', tab: 'albums', actions: [cols, { icon: 'more', label: 'Más', fn: () => albumMenu(r.arg, l) }], empty: 'Este álbum está vacío' });
   } else if (n === 'month') {
     const l = live().filter(i => monthKey(i.date) === r.arg);
-    Object.assign(v, { title: l[0] ? monthLabel(l[0].date) : 'Historia', items: l, parent: '#/stories', tab: 'stories', actions: [cols] });
+    Object.assign(v, { title: l[0] ? monthLabel(l[0].date) : 'Historia', items: l, parent: '#/collections', tab: 'collections', actions: [cols] });
   } else if (n === 'fav') {
-    Object.assign(v, { title: 'Favoritos', items: live().filter(i => i.favorite), parent: '#/', actions: [cols], empty: 'Aún no tienes favoritos' });
+    Object.assign(v, { title: 'Favoritos', items: live().filter(i => i.favorite), parent: origin || '#/', tab: tabOf(), actions: [cols], empty: 'Aún no tienes favoritos' });
   } else if (n === 'videos') {
-    Object.assign(v, { title: 'Vídeos', items: live().filter(isVideo), parent: '#/', actions: [cols], empty: 'No hay vídeos' });
+    Object.assign(v, { title: 'Vídeos', items: live().filter(isVideo), parent: origin || '#/', tab: tabOf(), actions: [cols], empty: 'No hay vídeos' });
+  } else if (n === 'screens') {
+    Object.assign(v, { title: 'Capturas de pantalla', items: live().filter(isShot), parent: '#/collections', tab: 'collections', actions: [cols], empty: 'No hay capturas de pantalla' });
   } else if (n === 'trash') {
     const l = trashed();
     Object.assign(v, { title: 'Papelera', items: l, parent: '#/', trash: true, sub: 'Los elementos se eliminan definitivamente tras 30 días', empty: 'La papelera está vacía', actions: [cols, { icon: 'more', label: 'Más', fn: () => menuSheet([{ icon: 'trash', label: 'Vaciar papelera', danger: true, fn: emptyTrash }]) }] });
@@ -215,7 +221,7 @@ function buildView(r) {
     const toks = norm(query).split(/\s+/).filter(Boolean);
     Object.assign(v, { title: 'Buscar', type: 'search', parent: '#/', items: toks.length ? live().filter(i => matches(i, toks)) : [], empty: toks.length ? 'Sin resultados' : 'Busca por nombre, álbum o mes' });
   } else {
-    Object.assign(v, { name: 'images', title: 'Imágenes', tab: 'images', items: live(), actions: [search, cols], empty: 'No hay imágenes. Impórtalas desde el menú.' });
+    Object.assign(v, { name: 'images', title: 'Imágenes', tab: 'images', items: live(), actions: [search, { icon: 'plus', label: 'Crear', fn: createPop }, cols], empty: 'No hay imágenes. Impórtalas desde el menú.' });
   }
   if (v.type === 'grid' && !v.trash) v.sub = v.sub || plural(v.items.length, 'elemento', 'elementos');
   if (v.trash) v.sub = plural(v.items.length, 'elemento', 'elementos') + ' · se eliminan tras 30 días';
@@ -331,7 +337,7 @@ function render(keep) {
     ? `<button class="pill" data-i="${i}" aria-label="Cambiar columnas">▦ ${colLabel(a.cols)}</button>`
     : `<button class="ib" data-i="${i}" aria-label="${esc(a.label)}">${icon(a.icon, 24)}</button>`).join('');
   document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('on', t.dataset.tab === v.tab));
-  $('#tab-menu').classList.toggle('on', ['fav', 'trash', 'videos'].includes(v.name));
+  $('#tab-menu').classList.toggle('on', v.name === 'trash' || (['fav', 'videos'].includes(v.name) && !v.tab));
   const extra = $('#lt-extra'); extra.innerHTML = '';
   if (v.type === 'search') {
     extra.innerHTML = `<div class="searchbox">${icon('search', 20)}<input type="search" placeholder="Buscar en la galería" value="${esc(query)}" autocomplete="off"></div>`;
@@ -347,7 +353,7 @@ function render(keep) {
   VG = null; body.classList.remove('vbody'); body.style.height = '';
   if (v.type === 'albums') body.innerHTML = albumsHTML(v.gid);
   else if (v.type === 'albumvis') body.innerHTML = visHTML();
-  else if (v.type === 'stories') body.innerHTML = storiesHTML();
+  else if (v.type === 'collections') body.innerHTML = collectionsHTML();
   else setGrid(v.items, v);
   if (v.type !== 'grid' && v.type !== 'search') lazy(body);
   if (selecting) { buildActionBar(); updateSel(); }
@@ -386,11 +392,21 @@ function visHTML() {
   if (!rows.length) return `<div class="empty">${icon('album', 48)}<p>No hay álbumes</p></div>`;
   return `<div class="rows vis">${rows.map(([n, l]) => { const c = albumCover(n, l), on = !(albums.get(n) || {}).hidden; return `<button class="row" data-vis="${esc(n)}" role="switch" aria-checked="${on}"><span class="ri">${c ? `<img alt="" data-id="${c.id}">` : icon('album', 22)}</span><span class="rl">${esc(n)}</span><span class="rn">${l.length}</span><span class="sw${on ? ' on' : ''}"></span></button>`; }).join('')}</div>`;
 }
-function storiesHTML() {
+function collectionsHTML() {
+  const m = albumNames(), mos = (kids) => `<div class="cov mosaic">${[0, 1, 2, 3].map(i => { const k = kids[i], cv = k && albumCover(k[0], k[1]); return `<div class="mz">${cv ? `<img alt="" draggable="false" data-id="${cv.id}">` : ''}</div>`; }).join('')}</div>`;
+  const folders = [...groups.values()].sort((a, b) => (a.ord ?? 1e9) - (b.ord ?? 1e9)).map(g => {
+    const kids = [...m].filter(([n]) => shown(n) && grpOf(n) === g.id);
+    return `<a class="alb" href="${hashOf('group', String(g.id))}" draggable="false">${mos(kids)}<b>${icon('folder', 14)} ${esc(g.name)}</b><span>${plural(kids.length, 'álbum', 'álbumes')}</span></a>`;
+  });
+  const newTile = `<button class="alb new" data-newfolder><div class="cov">${icon('plus', 36)}</div><b>Nueva carpeta</b><span>&nbsp;</span></button>`;
   const g = new Map();
   live().forEach(i => { const k = monthKey(i.date); if (!g.has(k)) g.set(k, []); g.get(k).push(i); });
-  if (!g.size) return `<div class="empty">${icon('star', 48)}<p>Aún no hay historias</p></div>`;
-  return `<div class="stories">${[...g].map(([k, l]) => `<a class="story" href="${hashOf('month', k)}"><img alt="" draggable="false" data-id="${l[Math.floor(l.length / 2)].id}"><div class="sc"><b>${esc(monthLabel(l[0].date))}</b><span>${plural(l.length, 'elemento', 'elementos')}</span></div></a>`).join('')}</div>`;
+  const stories = [...g].map(([k, l]) => `<a class="story" href="${hashOf('month', k)}"><img alt="" draggable="false" data-id="${l[Math.floor(l.length / 2)].id}"><div class="sc"><b>${esc(monthLabel(l[0].date))}</b><span>${plural(l.length, 'elemento', 'elementos')}</span></div></a>`);
+  const types = [['videos', 'play', 'Vídeos', live().filter(isVideo).length], ['fav', 'heart', 'Favoritos', live().filter(i => i.favorite).length],
+    ['screens', 'photo', 'Capturas de pantalla', live().filter(isShot).length], ['recent', 'clock', 'Recientes', autoList('recent').length]];
+  return `<h2 class="chead">Carpetas</h2><div class="hrow">${folders.join('')}${newTile}</div>${folders.length ? '' : '<p class="chint">Agrupa tus álbumes en carpetas.</p>'}
+<h2 class="chead">Historias</h2>${stories.length ? `<div class="hrow">${stories.join('')}</div>` : '<p class="chint">Aún no hay historias. Se crean a partir de tus fotos por mes.</p>'}
+<h2 class="chead">Tipos</h2><div class="types">${types.map(([h, ic, n, c]) => `<a class="type" href="#/${h}"><span class="ri">${icon(ic, 20)}</span><div><b>${n}</b><span>${c}</span></div></a>`).join('')}</div>`;
 }
 
 // ---------- collapsing header
@@ -414,6 +430,7 @@ $('#lt-extra').addEventListener('click', e => {
   aset.essential = b.dataset.ess === '1'; savePrefs(); render(true);
 });
 body.addEventListener('click', async e => {
+  if (e.target.closest('[data-newfolder]')) { newFolderGo(); return; }
   const r = e.target.closest('[data-vis]'); if (!r) return;
   const n = r.dataset.vis, on = !(albums.get(n) || {}).hidden;
   await setHidden([n], on);
@@ -423,7 +440,7 @@ $('#tb-actions').addEventListener('click', e => {
   const b = e.target.closest('[data-i]'); if (!b) return;
   const a = view.actions[+b.dataset.i];
   if (a.cols === 'alb') { aset.cols = aset.cols >= 4 ? 2 : aset.cols + 1; savePrefs(); render(true); }
-  else if (a.cols) setLevel((level + 1) % LEVELS.length); else a.fn();
+  else if (a.cols) setLevel((level + 1) % LEVELS.length); else a.fn(b);
 });
 
 // ---------- column level (pinch / button)
@@ -726,7 +743,7 @@ async function saveFiles(list) {
   toast(list.length === 1 ? 'Guardando en el dispositivo…' : `Guardando ${list.length} elementos…`);
 }
 async function createAlbum() {
-  const name = await dialog({ title: 'Crear álbum', input: { placeholder: 'Nombre del álbum' }, ok: 'Crear' });
+  const name = await dialog({ title: 'Nuevo álbum', input: { placeholder: 'Nombre del álbum' }, ok: 'Crear' });
   if (!name) return null;
   if (!albumNames().has(name)) { const a = { name, user: true, group: view.gid > 0 ? view.gid : undefined }; albums.set(name, a); await db.putAlbum(a); }
   render(true);
@@ -769,18 +786,22 @@ const nextOrd = () => Math.max(0, ...[...albums.values(), ...groups.values()].ma
 async function putAlb(n, f) { const a = albums.get(n) || { name: n }; f(a); albums.set(n, a); await db.putAlbum(a); }
 async function newGroup(name, ord) { const g = await db.putGroup({ name, ord: ord ?? nextOrd() }); groups.set(g.id, g); return g; }
 async function createGroup() {
-  const name = await dialog({ title: 'Crear grupo', input: { placeholder: 'Nombre del grupo' }, ok: 'Crear' });
-  if (!name) return;
-  await newGroup(name); render(true); toast('Grupo creado. Arrastra álbumes sobre él para añadirlos');
+  const name = await dialog({ title: 'Nueva carpeta', input: { placeholder: 'Nombre de la carpeta' }, ok: 'Crear' });
+  if (!name) return null;
+  const g = await newGroup(name); render(true);
+  return g;
 }
-function createMenu() { menuSheet([{ icon: 'plus', label: 'Crear álbum', fn: createAlbum }, { icon: 'folder', label: 'Crear grupo', fn: createGroup }]); }
+const newAlbumGo = async () => { const n = await createAlbum(); if (n) { toast(`Álbum «${n}» creado`); location.hash = hashOf('album', n); } };
+const newFolderGo = async () => { const g = await createGroup(); if (g) { toast(`Carpeta «${g.name}» creada`); location.hash = hashOf('group', String(g.id)); } };
+function createPop(btn) { popover(btn, [{ icon: 'album', label: 'Nuevo álbum', fn: newAlbumGo }, { icon: 'folder', label: 'Nueva carpeta', fn: newFolderGo }]); }
+const createMenu = createPop;
 const SORTS = [['custom', 'Personalizado'], ['name', 'Nombre'], ['count', 'Número de elementos'], ['dateDesc', 'Fecha (más recientes primero)'], ['dateAsc', 'Fecha (más antiguos primero)']];
 function sortMenu() {
   menuSheet(SORTS.map(([k, n]) => ({ icon: k === aset.sort ? 'check' : 'sort', label: n, fn: () => { aset.sort = k; savePrefs(); render(true); } })), 'Ordenar álbumes');
 }
 function albumsMenu() {
   menuSheet([
-    { icon: 'folder', label: 'Crear grupo', fn: createGroup },
+    { icon: 'folder', label: 'Nueva carpeta', fn: newFolderGo },
     { icon: 'sort', label: 'Ordenar', note: SORTS.find(x => x[0] === aset.sort)[1].replace(/ \(.*/, ''), fn: sortMenu },
     { icon: 'eye', label: 'Seleccionar álbumes para mostrar', fn: () => { location.hash = '#/albumvis'; } },
     { icon: 'album', label: aset.essential ? 'Ver todo' : 'Solo esenciales', fn: () => { aset.essential = !aset.essential; savePrefs(); render(true); } },

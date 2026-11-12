@@ -56,6 +56,23 @@ export function menuSheet(rows, title, onClose) {
   return s;
 }
 
+// ---- Menú emergente anclado a un botón (rows: {icon,label,fn})
+export function popover(anchor, rows) {
+  const back = el('div', 'pop-back'), p = el('div', 'pop');
+  rows.forEach(r => {
+    const b = el('button', 'pop-row', `${icon(r.icon || 'info', 20)}<span>${esc(r.label)}</span>`);
+    b.onclick = async () => { await dismiss(entry); r.fn && r.fn(); };
+    p.append(b);
+  });
+  back.append(p); document.body.append(back);
+  const a = anchor.getBoundingClientRect();
+  p.style.top = Math.round(a.bottom + 6) + 'px';
+  p.style.right = Math.max(8, Math.round(innerWidth - a.right)) + 'px';
+  requestAnimationFrame(() => back.classList.add('open'));
+  const entry = pushOverlay(() => { back.classList.remove('open'); setTimeout(() => back.remove(), 160); });
+  back.addEventListener('click', e => { if (e.target === back) dismiss(entry); });
+}
+
 // ---- Dialog (confirm / prompt)
 export function dialog({ title, message, input, ok = 'Aceptar', cancel = 'Cancelar', danger }) {
   return new Promise(res => {
