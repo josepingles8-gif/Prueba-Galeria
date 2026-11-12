@@ -4,4 +4,5 @@
     <string name="save_failed">No se pudo guardar</string>
     <string name="permission_denied">Permiso de almacenamiento denegado</string>
     <string name="share_title">Compartir</string>
+    <string name="video_error">No se pudo reproducir el vídeo</string>
 </resources>

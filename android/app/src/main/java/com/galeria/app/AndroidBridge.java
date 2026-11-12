@@ -493,6 +493,35 @@ public class AndroidBridge {
         activity.callJs("window.__onMediaDeleted&&window.__onMediaDeleted(" + out + ")");
     }
 
+    /** Reproduce un video del dispositivo ("v456" o "dev:v456") en el reproductor nativo. */
+    @JavascriptInterface
+    public void playVideo(String id) {
+        if (id != null && id.startsWith("dev:")) id = id.substring(4);
+        Uri u = id != null && id.startsWith("v") ? MediaApi.uriFor(id) : null;
+        if (u != null) launchPlayer(u);
+    }
+
+    /** Reproduce un archivo temporal subido antes con beginFile/appendChunk. */
+    @JavascriptInterface
+    public void playVideoFile(String fileId) {
+        Entry e = fileId == null ? null : files.get(fileId);
+        if (e == null) return;
+        closeQuietly(e);
+        launchPlayer(Uri.fromFile(e.file));
+    }
+
+    private void launchPlayer(Uri u) {
+        activity.runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(activity, PlayerActivity.class);
+                i.putExtra(PlayerActivity.EXTRA_URI, u.toString());
+                activity.startActivity(i);
+            } catch (Exception ex) {
+                Toast.makeText(app, R.string.video_error, Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
     @JavascriptInterface
     public void setTheme(boolean isDark) {
         activity.runOnUiThread(() -> activity.applyTheme(isDark));

@@ -1,5 +1,5 @@
 import { icon } from './icons.js';
-import { el, thumbURL, fmtDateTime, isVideo } from './util.js';
+import { el, thumbURL, fmtDateTime, isVideo, bridgeStage } from './util.js';
 import { pushOverlay, dismiss, menuSheet } from './ui.js';
 
 export function openViewer({ list, index, A }) {
@@ -23,6 +23,19 @@ export function openViewer({ list, index, A }) {
   const cur = () => items[idx];
   const media = () => panels[1].firstElementChild;
 
+  async function playNative(it, btn) {
+    const B = window.AndroidBridge;
+    try {
+      if (it.dev) B.playVideo(String(it.id).replace(/^dev:/, ''));
+      else {
+        btn.disabled = true; btn.style.opacity = '.5';
+        const fid = await bridgeStage(it.blob, it.name || 'video');
+        btn.disabled = false; btn.style.opacity = '';
+        if (!closed) B.playVideoFile(fid);
+      }
+    } catch { btn.disabled = false; btn.style.opacity = ''; }
+  }
+
   function build() {
     panels.forEach((p, k) => {
       p.querySelectorAll('video').forEach(v => v.pause());
@@ -31,7 +44,22 @@ export function openViewer({ list, index, A }) {
       if (!it) return;
       if (isVideo(it) && k === 1) {
         p.classList.add('vid');
-        p.innerHTML = `<video controls playsinline preload="metadata" src="${full(it)}" poster="${thumbURL(it)}"></video>`;
+        if (window.AndroidBridge && window.AndroidBridge.playVideo) { // WebView: reproductor nativo
+          const i = new Image(); i.draggable = false; i.alt = ''; i.src = thumbURL(it);
+          i.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain';
+          const b = el('button', 'v-play');
+          b.type = 'button'; b.setAttribute('aria-label', 'Reproducir vídeo');
+          b.style.cssText = 'position:absolute;left:50%;top:50%;width:76px;height:76px;margin:-38px 0 0 -38px;border:0;border-radius:50%;background:rgba(0,0,0,.6);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0';
+          b.innerHTML = '<svg viewBox="0 0 24 24" width="40" height="40" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+          b.onclick = () => playNative(it, b);
+          p.append(i, b);
+        } else {
+          const v = document.createElement('video');
+          v.controls = true; v.playsInline = true; v.preload = 'metadata'; v.poster = thumbURL(it);
+          const src = document.createElement('source');
+          src.src = full(it); const t = it.dev ? it.mime : it.blob && it.blob.type; if (t) src.type = t;
+          v.append(src); p.append(v);
+        }
       } else {
         const i = new Image(); i.draggable = false; i.decoding = 'async';
         if (it.dev) { // miniatura al instante y, para la actual, se cambia por el original al decodificarlo
@@ -92,7 +120,7 @@ export function openViewer({ list, index, A }) {
   const pts = new Map();
   let mode = null, start = null, pinch = null, lastTap = 0, tapT = 0;
   stage.addEventListener('pointerdown', e => {
-    if (e.target.closest('video') || animating) return;
+    if (e.target.closest('video, .v-play') || animating) return;
     stage.setPointerCapture(e.pointerId);
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pts.size === 1) { start = { x: e.clientX, y: e.clientY, t: performance.now(), tx, ty, moved: false }; mode = null; }

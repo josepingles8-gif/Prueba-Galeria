@@ -427,7 +427,23 @@ final class MediaApi {
                 partial = true;
             }
             long count = len == 0 ? 0 : end - start + 1;
-            if (start > 0) in.getChannel().position(start);
+            if (start > 0) {
+                try {
+                    in.getChannel().position(start);
+                } catch (IOException seekFail) { // descriptor no buscable: saltar leyendo
+                    long left = start;
+                    byte[] skip = new byte[16 * 1024];
+                    while (left > 0) {
+                        long n = in.skip(left);
+                        if (n <= 0) {
+                            int r = in.read(skip, 0, (int) Math.min(skip.length, left));
+                            if (r < 0) throw new IOException("eof");
+                            n = r;
+                        }
+                        left -= n;
+                    }
+                }
+            }
             h.put("Content-Length", String.valueOf(count));
             if (partial) {
                 h.put("Content-Range", "bytes " + start + "-" + end + "/" + len);

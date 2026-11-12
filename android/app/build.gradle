@@ -59,6 +59,8 @@ dependencies {
     implementation 'androidx.core:core:1.13.1'
     implementation 'androidx.activity:activity:1.9.3'
     implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.media3:media3-exoplayer:1.4.1'
+    implementation 'androidx.media3:media3-ui:1.4.1'
     // kotlin-stdlib-jdk7/jdk8 ya estan integrados en kotlin-stdlib >= 1.8: evita clases duplicadas.
     constraints {
         implementation('org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22') { because 'merged into kotlin-stdlib' }
