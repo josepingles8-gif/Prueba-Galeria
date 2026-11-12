@@ -1,7 +1,7 @@
 import { icon } from './icons.js';
 import * as db from './db.js';
-import { el, esc, norm, ls, dayKey, dayLabel, monthKey, monthLabel, fmtDateTime, fmtSize, isVideo, plural, thumbURL, dropThumbURL, makeThumb } from './util.js';
-import { pushOverlay, dismiss, sheet, menuSheet, dialog, toast } from './ui.js';
+import { el, esc, norm, ls, dayKey, dayLabel, monthKey, monthLabel, fmtDateTime, fmtSize, isVideo, plural, thumbURL, dropThumbURL, makeThumb, fmtDur, probeDuration, bridgeStage } from './util.js';
+import { pushOverlay, dismiss, overlayCount, sheet, menuSheet, dialog, toast } from './ui.js';
 import { openViewer } from './viewer.js';
 
 const $ = s => document.querySelector(s);
@@ -9,7 +9,9 @@ const app = $('#app'), scroll = $('#scroll'), body = $('#body');
 const LEVELS = [3, 4, 7, 'm'];
 const DAY = 864e5, PURGE_DAYS = 30;
 
-let items = [], albums = new Map(), byId = new Map();
+let items = [], albums = new Map(), byId = new Map(), groups = new Map();
+let aset = { sort: 'custom', cols: 3, essential: false };
+const asel = new Set();
 let level = Math.min(3, Math.max(0, +ls.get('gal.level') || 0));
 let sel = new Set(), selecting = false, selEntry = null;
 let view = { name: 'images', items: [] };
@@ -19,6 +21,8 @@ let query = '', lastKey = null;
 async function load() {
   items = await db.getItems();
   albums = new Map((await db.getAlbums()).map(a => [a.name, a]));
+  groups = new Map((await db.getGroups()).map(g => [g.id, g]));
+  aset = { sort: 'custom', cols: 3, essential: false, ...((await db.getMeta('albumPrefs')) || {}) };
   const old = items.filter(i => i.trashedAt && Date.now() - i.trashedAt > PURGE_DAYS * DAY);
   if (old.length) { await db.deleteItems(old.map(i => i.id)); const s = new Set(old.map(i => i.id)); items = items.filter(i => !s.has(i.id)); }
   reindex();
@@ -37,6 +41,31 @@ function albumCover(name, list) {
   const c = albums.get(name);
   const ci = c && c.cover != null && byId.get(c.cover);
   return ci && !ci.trashedAt ? ci : list[0];
+}
+
+const savePrefs = () => db.setMeta('albumPrefs', aset);
+const AUTO = [{ k: 'recent', name: 'Recientes', icon: 'clock' }, { k: 'fav', name: 'Favoritos', icon: 'heart' }, { k: 'videos', name: 'Vídeos', icon: 'play' }];
+const autoList = k => { const l = live(); return k === 'recent' ? l.filter(i => i.date > Date.now() - 30 * DAY) : k === 'fav' ? l.filter(i => i.favorite) : l.filter(isVideo); };
+const ESSENTIAL = ['camara', 'capturas de pantalla', 'descargas'];
+const isEssential = n => ESSENTIAL.includes(norm(n)) || !!(albums.get(n) && albums.get(n).user);
+const grpOf = n => { const r = albums.get(n); return r && r.group != null && groups.has(r.group) ? r.group : null; };
+const shown = n => { const r = albums.get(n) || {}; return !r.hidden && (!aset.essential || isEssential(n)); };
+// Mosaicos del nivel gid (null = raíz): álbumes y, en la raíz, grupos, ya ordenados.
+function tilesFor(gid) {
+  const m = albumNames(), out = [];
+  m.forEach((l, name) => {
+    if (!shown(name) || grpOf(name) !== gid) return;
+    out.push({ kind: 'a', key: 'a:' + name, name, l, n: l.length, ord: (albums.get(name) || {}).ord, date: l[0] ? l[0].date : 0, c: albumCover(name, l) });
+  });
+  if (gid == null) groups.forEach(g => {
+    const kids = [...m].filter(([n]) => shown(n) && grpOf(n) === g.id);
+    out.push({ kind: 'g', key: 'g:' + g.id, name: g.name, gid: g.id, kids, n: kids.length, ord: g.ord, date: 0 });
+  });
+  const so = aset.sort, nm = (a, b) => a.name.localeCompare(b.name, 'es');
+  const cmp = so === 'custom' ? (a, b) => ((a.ord ?? 1e9) - (b.ord ?? 1e9)) || (b.date - a.date)
+    : (a, b) => (a.kind === 'g') !== (b.kind === 'g') ? (a.kind === 'g' ? -1 : 1)
+      : a.kind === 'g' ? nm(a, b) : so === 'name' ? nm(a, b) : so === 'count' ? (b.n - a.n) || nm(a, b) : so === 'dateAsc' ? a.date - b.date : b.date - a.date;
+  return out.sort(cmp);
 }
 
 async function seed() {
@@ -71,13 +100,21 @@ function buildView(r) {
   const search = { icon: 'search', label: 'Buscar', fn: () => { location.hash = '#/search'; } };
   const cols = { cols: true };
   if (n === 'albums') {
-    Object.assign(v, { title: 'Álbumes', type: 'albums', tab: 'albums', actions: [search, { icon: 'plus', label: 'Crear álbum', fn: createAlbum }] });
-    v.sub = plural(albumNames().size, 'álbum', 'álbumes');
+    Object.assign(v, { title: 'Álbumes', type: 'albums', gid: null, tab: 'albums', actions: [search, { icon: 'plus', label: 'Crear', fn: createMenu }, { cols: 'alb' }, { icon: 'more', label: 'Más', fn: albumsMenu }] });
+    v.sub = plural(tilesFor(null).length + AUTO.length, 'álbum', 'álbumes');
+  } else if (n === 'group') {
+    const g = groups.get(+r.arg);
+    Object.assign(v, { title: g ? g.name : 'Grupo', type: 'albums', gid: g ? g.id : -1, tab: 'albums', parent: '#/albums', actions: [{ cols: 'alb' }, { icon: 'more', label: 'Más', fn: () => groupMenu(g) }] });
+    v.sub = plural(g ? tilesFor(g.id).length : 0, 'álbum', 'álbumes');
+  } else if (n === 'albumvis') {
+    Object.assign(v, { title: 'Álbumes a mostrar', type: 'albumvis', tab: 'albums', parent: '#/albums', sub: 'Los álbumes ocultos siguen apareciendo en Imágenes' });
+  } else if (n === 'recent') {
+    Object.assign(v, { title: 'Recientes', items: autoList('recent'), parent: '#/albums', tab: 'albums', actions: [cols], empty: 'No hay elementos recientes' });
   } else if (n === 'stories') {
     Object.assign(v, { title: 'Historias', type: 'stories', tab: 'stories', actions: [search] });
   } else if (n === 'album') {
     const l = live().filter(i => i.album === r.arg);
-    Object.assign(v, { title: r.arg, items: l, parent: '#/albums', tab: 'albums', actions: [cols, { icon: 'more', label: 'Más', fn: () => albumMenu(r.arg, l) }], empty: 'Este álbum está vacío' });
+    Object.assign(v, { title: r.arg, items: l, parent: grpOf(r.arg) != null ? hashOf('group', String(grpOf(r.arg))) : '#/albums', tab: 'albums', actions: [cols, { icon: 'more', label: 'Más', fn: () => albumMenu(r.arg, l) }], empty: 'Este álbum está vacío' });
   } else if (n === 'month') {
     const l = live().filter(i => monthKey(i.date) === r.arg);
     Object.assign(v, { title: l[0] ? monthLabel(l[0].date) : 'Historia', items: l, parent: '#/stories', tab: 'stories', actions: [cols] });
@@ -100,7 +137,7 @@ function buildView(r) {
   return v;
 }
 
-const colLabel = () => LEVELS[level] === 'm' ? 'Mes' : LEVELS[level];
+const colLabel = a => a === 'alb' ? aset.cols : LEVELS[level] === 'm' ? 'Mes' : LEVELS[level];
 let io;
 function lazy(root) {
   if (!io) io = new IntersectionObserver(es => es.forEach(e => {
@@ -149,7 +186,7 @@ function render(keep) {
   back.hidden = !v.parent;
   back.onclick = () => { location.hash = v.parent; };
   $('#tb-actions').innerHTML = v.actions.map((a, i) => a.cols
-    ? `<button class="pill" data-i="${i}" aria-label="Cambiar columnas">▦ ${colLabel()}</button>`
+    ? `<button class="pill" data-i="${i}" aria-label="Cambiar columnas">▦ ${colLabel(a.cols)}</button>`
     : `<button class="ib" data-i="${i}" aria-label="${esc(a.label)}">${icon(a.icon, 24)}</button>`).join('');
   document.querySelectorAll('.tab[data-tab]').forEach(t => t.classList.toggle('on', t.dataset.tab === v.tab));
   $('#tab-menu').classList.toggle('on', ['fav', 'trash', 'videos'].includes(v.name));
@@ -163,7 +200,9 @@ function render(keep) {
     });
     setTimeout(() => inp.focus(), 50);
   }
-  if (v.type === 'albums') body.innerHTML = albumsHTML();
+  if (v.type === 'albums' && v.gid == null) extra.innerHTML = `<div class="seg ess">${[[0, 'Ver todo'], [1, 'Solo esenciales']].map(([k, n]) => `<button data-ess="${k}" class="${!!k === aset.essential ? 'on' : ''}">${n}</button>`).join('')}</div>`;
+  if (v.type === 'albums') body.innerHTML = albumsHTML(v.gid);
+  else if (v.type === 'albumvis') body.innerHTML = visHTML();
   else if (v.type === 'stories') body.innerHTML = storiesHTML();
   else { body.innerHTML = ''; fillGrid(body, v.items, v); }
   if (v.type !== 'grid' && v.type !== 'search') lazy(body);
@@ -172,11 +211,23 @@ function render(keep) {
   onScroll();
 }
 
-function albumsHTML() {
-  const m = albumNames();
-  const rows = [...m].map(([name, l]) => ({ name, l, c: albumCover(name, l) })).sort((a, b) => ((b.l[0] ? b.l[0].date : 0) - (a.l[0] ? a.l[0].date : 0)));
+function albumsHTML(gid) {
+  const ck = '<i class="ck">' + icon('check', 15) + '</i>';
+  const tile = t => {
+    const c = `${t.kind === 'g'
+      ? `<div class="cov mosaic">${[0, 1, 2, 3].map(i => { const k = t.kids[i], cv = k && albumCover(k[0], k[1]); return `<div class="mz">${cv ? `<img alt="" draggable="false" data-id="${cv.id}">` : ''}</div>`; }).join('')}${ck}</div>`
+      : `<div class="cov">${t.c ? `<img alt="" draggable="false" data-id="${t.c.id}">` : icon('album', 36)}${ck}</div>`}`;
+    return `<a class="alb${t.kind === 'g' ? ' grp' : ''}${asel.has(t.key) ? ' sel' : ''}" data-k="${esc(t.key)}" draggable="false" href="${t.kind === 'g' ? hashOf('group', String(t.gid)) : hashOf('album', t.name)}">${c}<b>${t.kind === 'g' ? icon('folder', 14) + ' ' : ''}${esc(t.name)}</b><span>${t.kind === 'g' ? plural(t.n, 'álbum', 'álbumes') : t.n}</span></a>`;
+  };
+  const tiles = tilesFor(gid);
+  const autos = gid == null ? AUTO.map(a => { const l = autoList(a.k); return `<a class="alb auto" data-k="auto:${a.k}" draggable="false" href="#/${a.k}"><div class="cov">${l[0] ? `<img alt="" draggable="false" data-id="${l[0].id}">` : icon(a.icon, 36)}<em class="ab">${icon(a.icon, 16)}</em></div><b>${a.name}</b><span>${l.length}</span></a>`; }) : [];
+  if (!tiles.length && !autos.length) return `<div class="empty">${icon('album', 48)}<p>${gid === -1 ? 'Grupo no encontrado' : 'Este grupo está vacío. Arrastra álbumes hasta aquí o usa «Mover a grupo».'}</p></div>`;
+  return `<div class="albums" style="--ac:${aset.cols}">${autos.join('')}${tiles.map(tile).join('')}</div>`;
+}
+function visHTML() {
+  const rows = [...albumNames()].sort((a, b) => a[0].localeCompare(b[0], 'es'));
   if (!rows.length) return `<div class="empty">${icon('album', 48)}<p>No hay álbumes</p></div>`;
-  return `<div class="albums">${rows.map(r => `<a class="alb" href="${hashOf('album', r.name)}"><div class="cov">${r.c ? `<img alt="" draggable="false" data-id="${r.c.id}">` : icon('album', 36)}</div><b>${esc(r.name)}</b><span>${r.l.length}</span></a>`).join('')}</div>`;
+  return `<div class="rows vis">${rows.map(([n, l]) => { const c = albumCover(n, l), on = !(albums.get(n) || {}).hidden; return `<button class="row" data-vis="${esc(n)}" role="switch" aria-checked="${on}"><span class="ri">${c ? `<img alt="" data-id="${c.id}">` : icon('album', 22)}</span><span class="rl">${esc(n)}</span><span class="rn">${l.length}</span><span class="sw${on ? ' on' : ''}"></span></button>`; }).join('')}</div>`;
 }
 function storiesHTML() {
   const g = new Map();
@@ -472,8 +523,10 @@ const A = {
     if (isVideo(it)) return toast('No se pueden editar vídeos');
     let openEditor;
     try { ({ openEditor } = await import('./editor.js')); } catch { return toast('Editor no disponible'); }
-    const guard = pushOverlay(() => {});
-    openEditor(it.blob, {
+    // El editor es una entrada de historial propia: «atrás» = cancelar (con confirmación si hay cambios).
+    let ed = null;
+    const guard = pushOverlay(() => { if (ed) ed.abort(); }, () => !!(ed && ed.blocked()));
+    ed = openEditor(it.blob, {
       async onSave(blob) {
         dismiss(guard);
         const m = await makeThumb(blob);

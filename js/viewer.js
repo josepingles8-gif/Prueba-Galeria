@@ -63,6 +63,7 @@ export function openViewer({ list, index, A }) {
   function updateChrome() {
     const it = cur(); if (!it) return;
     q('.v-title').textContent = fmtDateTime(it.date);
+    const ed = q('[data-a=edit]'); if (ed) ed.hidden = isVideo(it);
     const f = q('[data-a=fav]');
     if (f) { f.innerHTML = icon(it.favorite ? 'heart-fill' : 'heart') + '<span>Favorito</span>'; f.classList.toggle('on', !!it.favorite); }
     const lo = Math.max(0, idx - 20), hi = Math.min(items.length, idx + 21);
@@ -188,6 +189,7 @@ export function openViewer({ list, index, A }) {
     else if (a === 'more') {
       menuSheet(inTrash ? [{ icon: 'info', label: 'Detalles', fn: () => A.details(it) }] : [
         { icon: 'info', label: 'Detalles', fn: () => A.details(it) },
+        { icon: 'download', label: 'Guardar en el dispositivo', fn: () => A.save(it) },
         { icon: 'plus', label: 'Añadir a álbum', fn: () => A.album(it) },
         { icon: 'photo', label: 'Establecer como portada', fn: () => A.cover(it) },
         { icon: 'edit', label: 'Cambiar nombre', fn: async () => { await A.rename(it); updateChrome(); } },

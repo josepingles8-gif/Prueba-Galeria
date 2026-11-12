@@ -47,12 +47,37 @@ function videoFrame(blob) {
   return new Promise((res, rej) => {
     const u = URL.createObjectURL(blob), v = document.createElement('video');
     v.muted = true; v.playsInline = true; v.preload = 'auto';
-    const t = setTimeout(() => { URL.revokeObjectURL(u); rej(new Error('timeout')); }, 5000);
-    v.onloadeddata = () => { v.currentTime = Math.min(1, (v.duration || 2) / 2); };
-    v.onseeked = () => { clearTimeout(t); res({ src: v, w: v.videoWidth, h: v.videoHeight, close: () => URL.revokeObjectURL(u) }); };
-    v.onerror = () => { clearTimeout(t); URL.revokeObjectURL(u); rej(new Error('video')); };
+    let done = false;
+    const fail = e => { if (done) return; done = true; clearTimeout(t); URL.revokeObjectURL(u); rej(e); };
+    const ok = () => { if (done) return; done = true; clearTimeout(t); res({ src: v, w: v.videoWidth, h: v.videoHeight, duration: v.duration, close: () => { URL.revokeObjectURL(u); v.removeAttribute('src'); v.load(); } }); };
+    const t = setTimeout(() => fail(new Error('timeout')), 6000);
+    v.onloadeddata = () => {
+      if (!v.videoWidth) return fail(new Error('sin imagen'));
+      const d = isFinite(v.duration) ? v.duration : 0;
+      try { v.currentTime = Math.min(0.1, d / 2 || 0.1); } catch { ok(); }
+    };
+    v.onseeked = ok;
+    v.onerror = () => fail(new Error('video'));
     v.src = u;
   });
+}
+export const fmtDur = s => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), x = s % 60; return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0'); };
+export function probeDuration(blob) {
+  return new Promise(res => {
+    const u = URL.createObjectURL(blob), v = document.createElement('video');
+    const end = d => { clearTimeout(t); URL.revokeObjectURL(u); res(isFinite(d) ? d : 0); };
+    const t = setTimeout(() => end(0), 4000);
+    v.preload = 'metadata'; v.onloadedmetadata = () => end(v.duration); v.onerror = () => end(0); v.src = u;
+  });
+}
+// Base64 por trozos (<=512 KB por trozo) hacia el puente nativo de Android.
+export async function bridgeStage(blob, name) {
+  const B = window.AndroidBridge, id = B.beginFile(name, blob.type || 'application/octet-stream'), STEP = 384 * 1024;
+  for (let o = 0; o < blob.size; o += STEP) {
+    const d = await new Promise((r, j) => { const f = new FileReader(); f.onload = () => r(String(f.result).split(',')[1] || ''); f.onerror = () => j(f.error); f.readAsDataURL(blob.slice(o, o + STEP)); });
+    B.appendChunk(id, d);
+  }
+  return id;
 }
 export async function makeThumb(blob) {
   let m = null;
@@ -66,14 +91,17 @@ export async function makeThumb(blob) {
   const S = 300, c = document.createElement('canvas');
   c.width = c.height = S;
   const g = c.getContext('2d');
-  g.fillStyle = '#888'; g.fillRect(0, 0, S, S);
+  const isVid = blob.type.startsWith('video/');
+  g.fillStyle = isVid ? '#2b2e35' : '#888'; g.fillRect(0, 0, S, S);
   let w = 0, h = 0;
   if (m) {
     w = m.w; h = m.h;
     const r = Math.max(S / w, S / h);
     g.drawImage(m.src, (S - w * r) / 2, (S - h * r) / 2, w * r, h * r);
     m.close();
+  } else if (isVid) { // decodificación fallida: tile neutro con icono de reproducción
+    g.fillStyle = 'rgba(255,255,255,.85)'; g.beginPath(); g.moveTo(112, 92); g.lineTo(112, 208); g.lineTo(212, 150); g.closePath(); g.fill();
   }
   const thumb = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.8));
-  return { thumb, width: w, height: h };
+  return { thumb, width: w, height: h, duration: m && m.duration };
 }

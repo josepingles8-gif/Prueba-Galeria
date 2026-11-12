@@ -805,5 +805,13 @@ export function openEditor(blob, { onSave, onCancel } = {}) {
     }
   })();
 
-  return { close: () => finish(onCancel) };
+  // Para «atrás» del sistema: true = vetar el cierre (se muestra/oculta el diálogo de descarte).
+  const blocked = () => {
+    if (finished) return false;
+    const dlg = $('.pe-dialog');
+    if (!dlg.hidden) { dlg.hidden = true; return true; }
+    if (isDirty() && bitmap) { dlg.hidden = false; return true; }
+    return false;
+  };
+  return { close: () => finish(onCancel), abort: () => finish(), blocked };
 }

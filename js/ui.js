@@ -4,8 +4,9 @@ import { icon } from './icons.js';
 // ---- Overlay stack bound to browser history (back button closes top overlay)
 const stack = [];
 let ignore = 0, waiters = [];
-export function pushOverlay(close) {
-  const e = { close };
+// guard (opcional): se consulta al pulsar «atrás»; si devuelve true, el cierre se veta y se restaura la entrada de historial.
+export function pushOverlay(close, guard) {
+  const e = { close, guard };
   stack.push(e);
   history.pushState({ ov: stack.length }, '');
   return e;
@@ -20,9 +21,12 @@ export function dismiss(e) {
 }
 addEventListener('popstate', () => {
   if (ignore > 0) { ignore--; waiters.splice(0).forEach(f => f()); return; }
+  const top = stack[stack.length - 1];
+  if (top && top.guard && top.guard()) { history.pushState({ ov: stack.length }, ''); return; }
   const e = stack.pop();
   if (e) e.close(true);
 });
+export const overlayCount = () => stack.length;
 
 // ---- Bottom sheet
 export function sheet({ title, content, onClose }) {
